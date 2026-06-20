@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 
 
@@ -11,9 +12,28 @@ typedef struct Process {
 } Process;
 
 void fcfs(Process processes[], int num_processes) {
+    // Build an index order sorted by arrival_time so processes don't have to
+    // be entered in arrival order. Insertion sort is stable, so ties keep
+    // their original input order (the usual FCFS tie-breaking convention).
+    int order[num_processes];
+    for (int i = 0; i < num_processes; i++) {
+        order[i] = i;
+    }
+    for (int i = 1; i < num_processes; i++) {
+        int key = order[i];
+        int j = i - 1;
+        while (j >= 0 && processes[order[j]].arrival_time > processes[key].arrival_time) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = key;
+    }
+
     int current_time = 0;
 
-    for (int i = 0; i < num_processes; i++) {
+    for (int k = 0; k < num_processes; k++) {
+        int i = order[k];
+
         if (processes[i].arrival_time > current_time) {
             current_time = processes[i].arrival_time;
         }
@@ -90,30 +110,101 @@ void priority(Process processes[], int num_processes) {
     }
 }
 
+// Simple FIFO queue of process indices, used by round_robin() to model the
+// ready queue (processes arrive into it and are re-enqueued after each
+// time-quantum slice if they aren't finished yet).
+typedef struct QueueNode {
+    int index;
+    struct QueueNode *next;
+} QueueNode;
+
+typedef struct {
+    QueueNode *front;
+    QueueNode *rear;
+} Queue;
+
+static void enqueue(Queue *q, int index) {
+    QueueNode *node = malloc(sizeof(QueueNode));
+    node->index = index;
+    node->next = NULL;
+    if (q->rear == NULL) {
+        q->front = q->rear = node;
+    } else {
+        q->rear->next = node;
+        q->rear = node;
+    }
+}
+
+static int dequeue(Queue *q) {
+    QueueNode *node = q->front;
+    int index = node->index;
+    q->front = node->next;
+    if (q->front == NULL) {
+        q->rear = NULL;
+    }
+    free(node);
+    return index;
+}
+
+// Enqueues every process that has arrived by current_time and hasn't been
+// queued yet (tracked via the `added` flags), in process-index order.
+static void enqueue_new_arrivals(Queue *q, Process processes[], int num_processes, int current_time, bool added[]) {
+    for (int i = 0; i < num_processes; i++) {
+        if (!added[i] && processes[i].arrival_time <= current_time) {
+            enqueue(q, i);
+            added[i] = true;
+        }
+    }
+}
+
 void round_robin(Process processes[], int num_processes, int time_quantum) {
     int remaining_burst_time[num_processes];
+    bool added[num_processes];
     for (int i = 0; i < num_processes; i++) {
         remaining_burst_time[i] = processes[i].burst_time;
+        added[i] = false;
     }
 
+    Queue q = { NULL, NULL };
     int current_time = 0;
     int completed_processes = 0;
 
-    while (completed_processes < num_processes) {
-        for (int i = 0; i < num_processes; i++) {
-            if (remaining_burst_time[i] > 0) {
-                if (remaining_burst_time[i] > time_quantum) {
-                    current_time += time_quantum;
-                    remaining_burst_time[i] -= time_quantum;
-                } else {
-                    current_time += remaining_burst_time[i];
-                    remaining_burst_time[i] = 0;
-                    completed_processes++;
-                }
+    enqueue_new_arrivals(&q, processes, num_processes, current_time, added);
 
-                // Print the execution
-                printf("Process %d is executing from %d to %d\n", processes[i].pid, current_time - time_quantum, current_time);
+    while (completed_processes < num_processes) {
+        if (q.front == NULL) {
+            // Ready queue is empty: jump forward to the next arrival instead
+            // of burning time units one at a time.
+            int next_arrival = -1;
+            for (int i = 0; i < num_processes; i++) {
+                if (!added[i] && (next_arrival == -1 || processes[i].arrival_time < next_arrival)) {
+                    next_arrival = processes[i].arrival_time;
+                }
             }
+            current_time = next_arrival;
+            enqueue_new_arrivals(&q, processes, num_processes, current_time, added);
+            continue;
+        }
+
+        int i = dequeue(&q);
+        int run_time = (remaining_burst_time[i] < time_quantum) ? remaining_burst_time[i] : time_quantum;
+        int start_time = current_time;
+
+        current_time += run_time;
+        remaining_burst_time[i] -= run_time;
+
+        // Print the execution
+        printf("Process %d is executing from %d to %d\n", processes[i].pid, start_time, current_time);
+
+        // Any process that arrived during this slice joins the queue before
+        // the just-run process gets re-enqueued behind it.
+        enqueue_new_arrivals(&q, processes, num_processes, current_time, added);
+
+        if (remaining_burst_time[i] == 0) {
+            completed_processes++;
+            printf("Process %d completed at time %d\n", processes[i].pid, current_time);
+        } else {
+            enqueue(&q, i);
         }
     }
 }
